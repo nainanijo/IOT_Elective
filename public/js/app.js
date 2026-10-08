@@ -3,6 +3,22 @@
 //  Real-time clock, kiosk auto-rotator, weather fetcher, view switching
 // =============================================================================
 
+function getApiBaseUrl() {
+  if (window.APP_CONFIG && typeof window.APP_CONFIG.apiBaseUrl === 'string') {
+    return window.APP_CONFIG.apiBaseUrl.replace(/\/$/, '');
+  }
+  if (App.data && App.data.config && App.data.config.apiBaseUrl) {
+    return App.data.config.apiBaseUrl.replace(/\/$/, '');
+  }
+  const stored = localStorage.getItem('snb_api_base_url');
+  if (stored) return stored.replace(/\/$/, '');
+  if (window.location.port === '5000') {
+    return window.location.origin;
+  }
+  const ip = typeof PI_IP !== 'undefined' ? PI_IP : '10.178.192.24';
+  return `http://${ip}:5000`;
+}
+
 const PI_IP = '10.178.192.24';
 
 /* ── State ─────────────────────────────────────────────────────────────────── */
@@ -17,11 +33,42 @@ const App = {
   data: null,
 };
 
+let noticeSearchStr = '';
+let noticeFilter = 'All';
+
+function escapeHTML(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function isValidHttpUrl(str) {
+  if (!str || typeof str !== 'string') return false;
+  const s = str.trim();
+  if (s.startsWith('data:image/')) return true;
+  try {
+    const parsed = new URL(s, window.location.origin);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
 
 function isNoticeExpired(notice) {
-  if (!notice || !notice.expiryDate) return false;
-  const expiry = new Date(notice.expiryDate);
-  return expiry < new Date();
+  if (!notice) return false;
+  const deadlineStr = notice.deadline || notice.expiryDate;
+  if (!deadlineStr) return false;
+  const match = String(deadlineStr).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const endOfDay = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999);
+    return endOfDay < new Date();
+  }
+  const expiry = new Date(deadlineStr);
+  return !isNaN(expiry.getTime()) && expiry < new Date();
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────────*/
@@ -40,6 +87,14 @@ function loadData() {
       if (!App.data.timetable || !App.data.timetable.classes || Array.isArray(App.data.timetable.days?.['Monday'])) {
         App.data.timetable = def.timetable;
       }
+      // Migrate legacy notices with expiryDate to deadline
+      if (Array.isArray(App.data.notices)) {
+        App.data.notices.forEach(n => {
+          if (n && n.expiryDate && !n.deadline) {
+            n.deadline = n.expiryDate;
+          }
+        });
+      }
       return;
     } catch(e) {}
   }
@@ -48,6 +103,17 @@ function loadData() {
 }
 
 function saveData() {
+  if (App.data) {
+    if (App.data.admin && 'password' in App.data.admin) {
+      delete App.data.admin.password;
+    }
+    if ('token' in App.data) {
+      delete App.data.token;
+    }
+    if ('sessionToken' in App.data) {
+      delete App.data.sessionToken;
+    }
+  }
   localStorage.setItem('noticeboard_data', JSON.stringify(App.data));
 }
 
@@ -81,13 +147,17 @@ function updateClock() {
 
 /* ── View Switching ──────────────────────────────────────────────────────────*/
 function switchView(view) {
+  if (!App.views.includes(view)) return;
   App.currentView = view;
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.mobile-nav-btn').forEach(b => b.classList.remove('active'));
   const el = document.getElementById('view-' + view);
   if (el) el.classList.add('active');
   const nb = document.getElementById('nav-' + view);
   if (nb) nb.classList.add('active');
+  const mnb = document.getElementById('mnav-' + view);
+  if (mnb) mnb.classList.add('active');
 
   if (view === 'timetable') renderTimetable();
   if (view === 'weather')   renderWeather();
@@ -147,10 +217,19 @@ function updateUrgentBanner() {
 function loadCollegeLogo() {
   const logoImg = document.getElementById('college-logo-img');
   const logoPlaceholder = document.getElementById('logo-placeholder');
-  
-  if (logoImg) {
-    // Add a cache buster timestamp so updated logos refresh instantly
-    logoImg.src = `http://${PI_IP}:5000/api/logo?t=${new Date().getTime()}`;
+  const apiBase = getApiBaseUrl();
+
+  if (App.data && App.data.config && App.data.config.collegeLogo) {
+    if (logoImg) {
+      logoImg.src = App.data.config.collegeLogo;
+      logoImg.style.display = 'block';
+      if (logoPlaceholder) logoPlaceholder.style.display = 'none';
+      return;
+    }
+  }
+
+  if (logoImg && apiBase) {
+    logoImg.src = `${apiBase}/api/logo?t=${Date.now()}`;
     logoImg.onload = () => {
       logoImg.style.display = 'block';
       if (logoPlaceholder) logoPlaceholder.style.display = 'none';
@@ -159,82 +238,287 @@ function loadCollegeLogo() {
       logoImg.style.display = 'none';
       if (logoPlaceholder) logoPlaceholder.style.display = 'inline-block';
     };
+  } else if (logoPlaceholder) {
+    logoPlaceholder.style.display = 'inline-block';
   }
 }
 
-// Call on startup
-document.addEventListener('DOMContentLoaded', () => {
-  loadCollegeLogo();
-  fetchNoticesFromBackend();
-  fetchAchievementsFromBackend();
-});
+/* ── Pi Backend Health Status ───────────────────────────────────────────────*/
+async function checkPiHealth() {
+  const badge = document.querySelector('.status-badge');
+  const dot = badge ? badge.querySelector('.status-dot') : null;
+  const label = badge ? badge.querySelector('span:not(.status-dot)') : null;
+  const apiBase = getApiBaseUrl();
 
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), 4000) : null;
 
+  try {
+    const res = await fetch(`${apiBase}/api/health`, {
+      method: 'GET',
+      signal: controller ? controller.signal : undefined
+    });
+    if (timeoutId) clearTimeout(timeoutId);
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (badge) {
+        badge.classList.remove('offline');
+        badge.classList.add('online');
+        badge.title = `Connected to Pi backend (${data.timestamp || 'active'})`;
+      }
+      if (dot) dot.style.background = 'var(--accent-green)';
+      if (label) label.textContent = 'Pi Online';
+      return true;
+    } else {
+      throw new Error(`HTTP ${res.status}`);
+    }
+  } catch (err) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (badge) {
+      badge.classList.remove('online');
+      badge.classList.add('offline');
+      badge.title = 'Backend unreachable - running in standalone cached mode';
+    }
+    if (dot) dot.style.background = 'var(--accent-amber)';
+    if (label) label.textContent = 'Standalone Mode';
+    return false;
+  }
+}
+
+function schedulePiHealthCheck() {
+  checkPiHealth();
+  if (typeof setInterval !== 'undefined') {
+    setInterval(checkPiHealth, 30000);
+  }
+}
 
 // Render Notices into the UI
-function renderNotices(notices) {
-  const container = document.getElementById('notices-container') || document.getElementById('main-content');
-  if (!container) return;
+function renderNotices(noticesInput) {
+  if (Array.isArray(noticesInput)) {
+    App.data.notices = noticesInput;
+    saveData();
+  }
 
-  if (!notices || notices.length === 0) {
-    container.innerHTML = '<p class="empty-msg">No notices posted yet.</p>';
+  const grid = document.getElementById('notices-grid');
+  if (!grid) {
+    console.warn('[renderNotices] Target #notices-grid element not found in DOM.');
     return;
   }
 
-  container.innerHTML = notices.map(notice => `
-    <div class="notice-card" style="border-left: 4px solid var(--accent-primary, #7b9dd4); margin-bottom: 12px; padding: 12px; background: var(--bg-card, #fff); border-radius: 8px;">
-      <h3 style="margin: 0 0 6px 0;">${notice.title || 'Untitled Notice'}</h3>
-      <p style="margin: 0 0 8px 0;">${notice.content || notice.body || ''}</p>
-      <small style="color: #666;">${notice.date || new Date().toLocaleDateString()}</small>
-    </div>
-  `).join('');
+  const allNotices = (App.data && Array.isArray(App.data.notices)) ? App.data.notices : [];
+  const activeNotices = allNotices.filter(n => n.active !== false && !isNoticeExpired(n));
+
+  // Populate dynamic category chips in #notice-filter-chips
+  const filterBar = document.getElementById('notice-filter-chips');
+  if (filterBar) {
+    const rawCategories = activeNotices.map(n => n.category).filter(Boolean);
+    const categories = ['All', ...Array.from(new Set(rawCategories))];
+    filterBar.innerHTML = '';
+    categories.forEach(cat => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'filter-chip' + (cat === noticeFilter ? ' active' : '');
+      const count = cat === 'All' ? activeNotices.length : activeNotices.filter(n => n.category === cat).length;
+      chip.innerHTML = `<span>${cat === 'All' ? '📋 All' : escapeHTML(cat)}</span> <span class="chip-count">${count}</span>`;
+      chip.addEventListener('click', () => {
+        noticeFilter = cat;
+        renderNotices();
+      });
+      filterBar.appendChild(chip);
+    });
+  }
+
+  let filtered = activeNotices;
+  if (noticeFilter && noticeFilter !== 'All') {
+    filtered = filtered.filter(n => n.category === noticeFilter);
+  }
+  if (noticeSearchStr) {
+    const s = noticeSearchStr.toLowerCase();
+    filtered = filtered.filter(n =>
+      (n.title && n.title.toLowerCase().includes(s)) ||
+      (n.content && n.content.toLowerCase().includes(s)) ||
+      (n.author && n.author.toLowerCase().includes(s))
+    );
+  }
+
+  const pOrder = { urgent: 0, high: 1, normal: 2 };
+  filtered.sort((a, b) => (pOrder[a.priority] ?? 9) - (pOrder[b.priority] ?? 9));
+
+  grid.innerHTML = '';
+  if (filtered.length === 0) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+      <div class="es-icon">📋</div><h3>No active notices found</h3>
+      <p>All notices may be past their deadline or no notices match your search.</p></div>`;
+    return;
+  }
+
+  const categoryIcons = {
+    Academic: '📚', Events: '🎉', Placement: '💼', General: '📢', Urgent: '🚨', Circular: '📜'
+  };
+
+  filtered.forEach(notice => {
+    const card = document.createElement('div');
+    card.className = `notice-card priority-${notice.priority || 'normal'}`;
+    const deadlineText = notice.deadline ? formatDate(notice.deadline) : formatDate(notice.date);
+    card.innerHTML = `
+      <div class="notice-meta">
+        <span class="notice-category">${categoryIcons[notice.category] || '📌'} ${escapeHTML(notice.category || 'General')}</span>
+        <span class="notice-priority-badge">${escapeHTML((notice.priority || 'normal').toUpperCase())}</span>
+      </div>
+      <div class="notice-title">${escapeHTML(notice.title || 'Untitled Notice')}</div>
+      <div class="notice-content">${escapeHTML(notice.content || '')}</div>
+      <div class="notice-footer">
+        <span>👤 ${escapeHTML(notice.author || 'Admin')}</span>
+        <span title="Valid until deadline" class="notice-deadline-tag">⏳ Deadline: ${escapeHTML(deadlineText)}</span>
+      </div>`;
+    card.addEventListener('click', () => openNoticeModal(notice));
+    grid.appendChild(card);
+  });
+}
+
+function openNoticeModal(notice) {
+  if (!notice) return;
+  const modal = document.getElementById('notice-modal');
+  if (!modal) return;
+  const t = document.getElementById('notice-modal-title');
+  const b = document.getElementById('notice-modal-body');
+  const a = document.getElementById('notice-modal-author');
+  const d = document.getElementById('notice-modal-date');
+  const c = document.getElementById('notice-modal-cat');
+  const deadlineText = notice.deadline ? formatDate(notice.deadline) : formatDate(notice.date);
+  if (t) t.textContent = notice.title || 'Untitled Notice';
+  if (b) b.textContent = notice.content || '';
+  if (a) a.textContent = `👤 ${notice.author || 'Admin'}`;
+  if (d) d.textContent = `⏳ Deadline: ${deadlineText}`;
+  if (c) c.textContent = `🏷 ${notice.category || 'General'}`;
+  modal.classList.add('open');
 }
 
 // Render Achievements into the UI
-function renderAchievements(achievements) {
-  const container = document.getElementById('achievements-container') || document.getElementById('stars-view');
-  if (!container) return;
+function renderAchievements(achievementsInput) {
+  if (Array.isArray(achievementsInput)) {
+    App.data.achievements = achievementsInput;
+    saveData();
+  }
 
-  if (!achievements || achievements.length === 0) {
-    container.innerHTML = '<p class="empty-msg">No achievements recorded.</p>';
+  const grid = document.getElementById('achievements-grid');
+  if (!grid) {
+    console.warn('[renderAchievements] Target #achievements-grid element not found in DOM.');
     return;
   }
 
-  container.innerHTML = achievements.map(item => `
-    <div class="achievement-card" style="margin-bottom: 12px; padding: 12px; background: var(--bg-card, #fff); border-radius: 8px;">
-      <h4 style="margin: 0 0 4px 0;">🏆 ${item.title || item.studentName || 'Achievement'}</h4>
-      <p style="margin: 0;">${item.description || item.details || ''}</p>
-    </div>
-  `).join('');
+  const achs = (App.data && Array.isArray(App.data.achievements)) ? App.data.achievements : [];
+  grid.innerHTML = '';
+  if (achs.length === 0) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+      <div class="es-icon">🏆</div><h3>No achievements yet</h3>
+      <p>Add student achievements from the Admin panel.</p></div>`;
+    return;
+  }
+
+  achs.forEach(ach => {
+    const card = document.createElement('div');
+    card.className = 'ach-card' + (ach.featured ? ' featured' : '');
+    const iconMap = { 'IoT & Robotics': '🤖', Research: '📄', Cybersecurity: '🛡️', Robotics: '⚙️' };
+    const safeImg = isValidHttpUrl(ach.image) ? ach.image : '';
+    const imgHTML = safeImg
+      ? `<div class="ach-image-wrap"><img src="${escapeHTML(safeImg)}" alt="${escapeHTML(ach.studentName || '')}" loading="lazy"><div class="ach-image-overlay"></div></div>`
+      : `<div class="ach-img-placeholder">${iconMap[ach.category] || '🏆'}</div>`;
+
+    card.innerHTML = `
+      ${imgHTML}
+      <span class="ach-featured-badge">⭐ Featured</span>
+      <div class="ach-body">
+        <div class="ach-category">${escapeHTML(ach.category || '')}</div>
+        <div class="ach-title">${escapeHTML(ach.title || '')}</div>
+        <div class="ach-student">🎓 ${escapeHTML(ach.studentName || '')}</div>
+        <div class="ach-competition">🏆 ${escapeHTML(ach.competition || '')}</div>
+        <div class="ach-award">🥇 ${escapeHTML(ach.award || '')}</div>
+      </div>`;
+    card.addEventListener('click', () => openAchModal(ach));
+    grid.appendChild(card);
+  });
 }
-/* ── NOTICES & ACHIEVEMENTS ─────────────────────────────────────────────────────────────────*/
+
+function openAchModal(ach) {
+  if (!ach) return;
+  const modal = document.getElementById('ach-modal');
+  if (!modal) return;
+  const titleEl = document.getElementById('ach-modal-title');
+  const studentEl = document.getElementById('ach-modal-student');
+  const compEl = document.getElementById('ach-modal-comp');
+  const awardEl = document.getElementById('ach-modal-award');
+  const descEl = document.getElementById('ach-modal-desc');
+  const dateEl = document.getElementById('ach-modal-date');
+  const imgEl = document.getElementById('ach-modal-img');
+
+  if (titleEl) titleEl.textContent = ach.title || '';
+  if (studentEl) studentEl.textContent = (ach.studentName || '') + (ach.rollNo ? ` (${ach.rollNo})` : '');
+  if (compEl) compEl.textContent = ach.competition || '';
+  if (awardEl) awardEl.textContent = ach.award || '';
+  if (descEl) descEl.textContent = ach.description || '';
+  if (dateEl) dateEl.textContent = formatDate(ach.date);
+  if (imgEl) {
+    if (isValidHttpUrl(ach.image)) {
+      imgEl.src = ach.image;
+      imgEl.style.display = 'block';
+    } else {
+      imgEl.style.display = 'none';
+    }
+  }
+  modal.classList.add('open');
+}
+
+/* ── NOTICES & ACHIEVEMENTS BACKEND SYNC ────────────────────────────────────*/
 async function fetchNoticesFromBackend() {
+  const apiBase = getApiBaseUrl();
+  if (!apiBase) {
+    renderNotices();
+    return;
+  }
   try {
-    const res = await fetch(`http://${PI_IP}:5000/api/notices`);
+    const res = await fetch(`${apiBase}/api/notices`);
     if (res.ok) {
       const notices = await res.json();
-      renderNotices(notices);
+      if (Array.isArray(notices)) {
+        App.data.notices = notices;
+        saveData();
+      }
     }
   } catch (e) {
-    console.error('Failed to load notices:', e);
+    console.warn('Backend notices unreachable, using local data:', e);
+  } finally {
+    renderNotices();
   }
 }
 
 async function fetchAchievementsFromBackend() {
+  const apiBase = getApiBaseUrl();
+  if (!apiBase) {
+    renderAchievements();
+    return;
+  }
   try {
-    const res = await fetch(`http://${PI_IP}:5000/api/achievements`);
+    const res = await fetch(`${apiBase}/api/achievements`);
     if (res.ok) {
       const achievements = await res.json();
-      renderAchievements(achievements);
+      if (Array.isArray(achievements)) {
+        App.data.achievements = achievements;
+        saveData();
+      }
     }
   } catch (e) {
-    console.error('Failed to load achievements:', e);
+    console.warn('Backend achievements unreachable, using local data:', e);
+  } finally {
+    renderAchievements();
   }
 }
 
 
 /* ── TIMETABLE (S7, S5, S3 MRE All on One Page) ─────────────────────────────*/
 let currentDay = '';
+let lastTrackedDate = '';
+let userSelectedDay = false;
 let activeClassFilter = 'all'; // 'all', 'S7 MRE', 'S5 MRE', 'S3 MRE'
 
 function renderTimetable() {
@@ -243,8 +527,18 @@ function renderTimetable() {
   }
   const days     = Object.keys(App.data.timetable.days);
   const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const todayDateString = new Date().toDateString();
   const today    = dayNames[new Date().getDay()];
-  if (!currentDay) currentDay = days.includes(today) ? today : days[0];
+
+  // If date rollover occurred overnight, clear manual user selection and recompute to today
+  if (lastTrackedDate !== todayDateString) {
+    lastTrackedDate = todayDateString;
+    userSelectedDay = false;
+  }
+
+  if (!userSelectedDay || !days.includes(currentDay)) {
+    currentDay = days.includes(today) ? today : days[0];
+  }
 
   // Day pills
   const pillsEl = document.getElementById('day-pills');
@@ -254,7 +548,11 @@ function renderTimetable() {
       const pill = document.createElement('button');
       pill.className = 'day-pill' + (d === currentDay ? ' active' : '') + (d === today ? ' today' : '');
       pill.innerHTML = `<span>${d}</span>${d === today ? '<span class="today-dot" title="Today">●</span>' : ''}`;
-      pill.onclick = () => { currentDay = d; renderTimetable(); };
+      pill.onclick = () => {
+        currentDay = d;
+        userSelectedDay = true;
+        renderTimetable();
+      };
       pillsEl.appendChild(pill);
     });
   }
@@ -323,20 +621,20 @@ function renderTimetableCards() {
           rowsHTML += `
             <tr class="tt-row break-row">
               <td colspan="5" class="tt-break-cell">
-                <span class="tt-break-pill">${isLunch} ${p.subject} &nbsp;·&nbsp; ${p.time}</span>
+                <span class="tt-break-pill">${isLunch ? '🍱' : '☕'} ${escapeHTML(p.subject)} &nbsp;·&nbsp; ${escapeHTML(p.time)}</span>
               </td>
             </tr>`;
         } else {
           rowsHTML += `
             <tr class="tt-row ${isCurrent ? 'current-period' : ''}">
-              <td class="tt-period"><span class="period-badge">${p.period}</span></td>
-              <td class="tt-time">${p.time}</td>
+              <td class="tt-period"><span class="period-badge">${escapeHTML(p.period)}</span></td>
+              <td class="tt-time">${escapeHTML(p.time)}</td>
               <td class="tt-subject">
-                <span class="tt-sub-name">${p.subject}</span>
+                <span class="tt-sub-name">${escapeHTML(p.subject)}</span>
                 ${isCurrent ? '<span class="now-badge">● LIVE NOW</span>' : ''}
               </td>
-              <td class="tt-code-col"><span class="tt-code">${p.code}</span></td>
-              <td class="tt-teacher">${p.teacher}</td>
+              <td class="tt-code-col"><span class="tt-code">${escapeHTML(p.code || '')}</span></td>
+              <td class="tt-teacher">${escapeHTML(p.teacher || '')}</td>
             </tr>`;
         }
       });
@@ -410,7 +708,7 @@ async function fetchWeather() {
   try {
     const lat = cfg.weatherLat || 9.9312;
     const lon = cfg.weatherLon || 76.2673;
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code,apparent_temperature&hourly=temperature_2m,precipitation_probability,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=auto&forecast_days=4`;
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code,apparent_temperature,surface_pressure&hourly=temperature_2m,precipitation_probability,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=auto&forecast_days=4`;
     const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
     if (res.ok) {
       const raw = await res.json();
@@ -462,26 +760,35 @@ function parseOpenMeteo(raw, city) {
     checkSunsetTheme();
   }
 
-  // Hourly – next 5 upcoming
-  const nowHour = new Date().getHours();
-  const hours   = (hourly.time || [])
-    .map((t,i) => ({ t, temp: hourly.temperature_2m?.[i], pop: hourly.precipitation_probability?.[i], code: hourly.weather_code?.[i] }))
-    .filter(h => new Date(h.t).getHours() > nowHour && new Date(h.t).getDate() === new Date().getDate())
-    .slice(0,5)
+  // Hourly – next 5 upcoming chronologically across midnight using timestamps
+  const nowTs = Date.now();
+  const hours = (hourly.time || [])
+    .map((t, i) => ({
+      ts: new Date(t).getTime(),
+      t,
+      temp: hourly.temperature_2m?.[i],
+      pop: hourly.precipitation_probability?.[i],
+      code: hourly.weather_code?.[i]
+    }))
+    .filter(h => h.ts > nowTs)
+    .slice(0, 5)
     .map(h => ({
-      time: new Date(h.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}),
-      temp: Math.round(h.temp),
+      time: new Date(h.t).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }),
+      temp: Math.round(h.temp ?? 28),
       icon: wmoIcon(h.code),
-      pop:  (h.pop ?? 0) + '%'
+      pop: (h.pop ?? 0) + '%'
     }));
 
-  const daily4 = (daily.time || []).slice(0,4).map((t,i) => ({
+  const daily4 = (daily.time || []).slice(0, 4).map((t, i) => ({
     day:       dayNames[i] || dn[new Date(t).getDay()],
     condition: wmoDesc(daily.weather_code?.[i]),
-    high:      Math.round(daily.temperature_2m_max?.[i]),
-    low:       Math.round(daily.temperature_2m_min?.[i]),
+    high:      Math.round(daily.temperature_2m_max?.[i] ?? 30),
+    low:       Math.round(daily.temperature_2m_min?.[i] ?? 24),
     icon:      wmoIcon(daily.weather_code?.[i])
   }));
+
+  const nowHour = new Date().getHours();
+  const pressureVal = cur.surface_pressure ?? cur.pressure_msl ?? (App.data?.weatherFallback?.pressure) ?? 1012;
 
   return {
     location:        city || 'Campus',
@@ -491,7 +798,7 @@ function parseOpenMeteo(raw, city) {
     icon:            wmoIcon(cur.weather_code ?? 0),
     humidity:        Math.round(cur.relative_humidity_2m ?? 75),
     windSpeed:       Math.round(cur.wind_speed_10m ?? 10),
-    pressure:        1010,
+    pressure:        Math.round(pressureVal),
     uvIndex:         '-',
     airQuality:      '-',
     rainProbability: hourly.precipitation_probability?.[nowHour] ?? 0,
@@ -500,63 +807,75 @@ function parseOpenMeteo(raw, city) {
   };
 }
 
-
-
 function renderWeather() {
   const w = App.data._weather || App.data.weatherFallback;
-  const cfg = App.data.config;
+  const cfg = (App.data && App.data.config) || {};
+
+  const setTxt = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
 
   const wIcon = document.getElementById('w-icon');
   if (wIcon) wIcon.textContent = getWeatherIcon(w.icon);
-  document.getElementById('w-temp').innerHTML       = `${w.temperature}<span class="weather-unit">°C</span>`;
-  document.getElementById('w-condition').textContent = w.condition;
-  document.getElementById('w-feels').textContent    = `Feels like ${w.feelsLike}°C`;
-  document.getElementById('w-location').textContent = w.location || cfg.weatherCity;
-  document.getElementById('w-humidity').textContent  = w.humidity + '%';
-  document.getElementById('w-wind').textContent      = w.windSpeed + ' km/h';
-  document.getElementById('w-pressure').textContent  = w.pressure + ' hPa';
-  document.getElementById('w-rain').textContent      = w.rainProbability + '%';
+  const wTemp = document.getElementById('w-temp');
+  if (wTemp) wTemp.innerHTML = `${w.temperature}<span class="weather-unit">°C</span>`;
+  setTxt('w-condition', w.condition);
+  setTxt('w-feels', `Feels like ${w.feelsLike}°C`);
+  setTxt('w-location', w.location || cfg.weatherCity || 'Campus');
+  setTxt('w-humidity', w.humidity + '%');
+  setTxt('w-wind', w.windSpeed + ' km/h');
+  setTxt('w-pressure', w.pressure + ' hPa');
+  setTxt('w-rain', w.rainProbability + '%');
 
   // Endpoint info
   const epEl = document.getElementById('w-endpoint-info');
-  if (cfg.weatherEndpoint) {
-    epEl.innerHTML = `🔌 Integrated with custom endpoint: <code>${cfg.weatherEndpoint}</code>`;
-    epEl.style.display = 'block';
-  } else {
-    epEl.style.display = 'none';
+  if (epEl) {
+    if (cfg.weatherEndpoint) {
+      epEl.innerHTML = `🔌 Integrated with custom endpoint: <code>${escapeHTML(cfg.weatherEndpoint)}</code>`;
+      epEl.style.display = 'block';
+    } else {
+      epEl.style.display = 'none';
+    }
   }
 
   // Hourly forecast
   const hourlyEl = document.getElementById('w-hourly');
-  hourlyEl.innerHTML = '';
-  (w.forecast || []).forEach(h => {
-    hourlyEl.innerHTML += `
-      <div class="forecast-hour">
-        <div class="fh-time">${h.time}</div>
+  if (hourlyEl) {
+    hourlyEl.innerHTML = '';
+    (w.forecast || []).forEach(h => {
+      const item = document.createElement('div');
+      item.className = 'forecast-hour';
+      item.innerHTML = `
+        <div class="fh-time">${escapeHTML(h.time)}</div>
         <div class="fh-icon">${getWeatherIcon(h.icon)}</div>
-        <div class="fh-temp">${h.temp}°</div>
-        <div class="fh-pop">${h.pop}</div>
-      </div>`;
-  });
-  if (!w.forecast || w.forecast.length === 0) {
-    hourlyEl.innerHTML = '<div style="color:var(--text-muted);font-size:12px">No hourly data</div>';
+        <div class="fh-temp">${escapeHTML(String(h.temp))}°</div>
+        <div class="fh-pop">${escapeHTML(h.pop)}</div>`;
+      hourlyEl.appendChild(item);
+    });
+    if (!w.forecast || w.forecast.length === 0) {
+      hourlyEl.innerHTML = '<div style="color:var(--text-muted);font-size:12px">No hourly data</div>';
+    }
   }
 
   // Daily forecast
   const dailyEl = document.getElementById('w-daily');
-  dailyEl.innerHTML = '';
-  (w.daily || []).forEach(d => {
-    dailyEl.innerHTML += `
-      <div class="daily-row">
-        <span class="daily-day">${d.day}</span>
+  if (dailyEl) {
+    dailyEl.innerHTML = '';
+    (w.daily || []).forEach(d => {
+      const row = document.createElement('div');
+      row.className = 'daily-row';
+      row.innerHTML = `
+        <span class="daily-day">${escapeHTML(d.day)}</span>
         <span class="daily-icon">${getWeatherIcon(d.icon)}</span>
-        <span class="daily-condition">${d.condition}</span>
+        <span class="daily-condition">${escapeHTML(d.condition)}</span>
         <span class="daily-temps">
-          <span class="daily-high">${d.high}°</span>
-          <span class="daily-low">${d.low}°</span>
-        </span>
-      </div>`;
-  });
+          <span class="daily-high">${escapeHTML(String(d.high))}°</span>
+          <span class="daily-low">${escapeHTML(String(d.low))}°</span>
+        </span>`;
+      dailyEl.appendChild(row);
+    });
+  }
 }
 
 function updateHeaderWeather() {
@@ -714,17 +1033,41 @@ function renderFlashNewsTicker() {
     ? App.theHinduHeadlines
     : THE_HINDU_DEFAULT_HEADLINES;
 
-  const buildItemsHTML = (list) => list.map(item => `
-    <span class="fnt-item" ${item.link ? `onclick="window.open('${item.link}','_blank')"` : ''}>
-      <span class="fnt-item-bullet">✦</span>
-      <span class="fnt-item-cat">${item.category || 'National'}</span>
-      <span class="fnt-item-title">${item.title}</span>
-      <span class="fnt-item-time">${item.time}</span>
-    </span>
-  `).join('');
+  const isLive = Boolean(App.theHinduHeadlines && App.theHinduHeadlines.length > 0);
+  const badge = document.querySelector('.flash-news-badge');
+  if (badge) {
+    badge.textContent = isLive ? 'FLASH NEWS' : 'CAMPUS NEWS';
+  }
+  const liveBadge = document.querySelector('.fnt-live-badge');
+  if (liveBadge) {
+    liveBadge.textContent = isLive ? '● LIVE FEED' : '○ ARCHIVE FEED';
+    liveBadge.style.color = isLive ? 'var(--accent-green)' : 'var(--text-muted)';
+  }
 
-  // Duplicate sequence for infinite continuous 60fps marquee
+  const buildItemsHTML = (list) => list.map(item => {
+    const safeLink = isValidHttpUrl(item.link) ? item.link : '';
+    return `
+      <span class="fnt-item" ${safeLink ? `data-href="${escapeHTML(safeLink)}" style="cursor:pointer;"` : ''}>
+        <span class="fnt-item-bullet">✦</span>
+        <span class="fnt-item-cat">${escapeHTML(item.category || 'National')}</span>
+        <span class="fnt-item-title">${escapeHTML(item.title || '')}</span>
+        <span class="fnt-item-time">${escapeHTML(item.time || '')}</span>
+      </span>
+    `;
+  }).join('');
+
   track.innerHTML = buildItemsHTML(items) + buildItemsHTML(items);
+
+  // Safe click delegation without inline event handlers
+  track.onclick = (e) => {
+    const itemEl = e.target.closest('.fnt-item[data-href]');
+    if (itemEl) {
+      const url = itemEl.dataset.href;
+      if (isValidHttpUrl(url)) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+    }
+  };
 }
 
 function scheduleNewsRefresh() {
@@ -756,8 +1099,8 @@ document.addEventListener('DOMContentLoaded', () => {
   updateClock();
   setInterval(updateClock, 1000);
 
-  // Nav buttons
-  document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
+  // Wire both desktop and mobile navigation buttons
+  document.querySelectorAll('.nav-btn[data-view], .mobile-nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
   });
 
@@ -831,6 +1174,12 @@ document.addEventListener('DOMContentLoaded', () => {
     themeBtn.addEventListener('click', toggleThemePreview);
   }
 
+  // Load backend data if configured, then render
+  loadCollegeLogo();
+  fetchNoticesFromBackend();
+  fetchAchievementsFromBackend();
+  schedulePiHealthCheck();
+
   // Initial render & kiosk start
   switchView('notices');
   checkSunsetTheme();
@@ -858,7 +1207,12 @@ function updateCollegeLogoDisplay() {
   const placeholder = document.getElementById('logo-placeholder');
   const uploadHint = document.getElementById('logo-upload-hint');
   const logoWrap = document.getElementById('college-logo-wrap');
-  const logoData = App.data.config && App.data.config.collegeLogo;
+  let logoData = App.data.config && App.data.config.collegeLogo;
+  const apiBase = getApiBaseUrl();
+
+  if (logoData && typeof logoData === 'string' && logoData.startsWith('/') && apiBase) {
+    logoData = `${apiBase}${logoData}`;
+  }
 
   if (logoImg) {
     if (logoData) {
@@ -916,5 +1270,8 @@ window.toggleThemePreview = toggleThemePreview;
 window.applyTheme         = applyTheme;
 window.isNoticeExpired    = isNoticeExpired;
 window.fetchTheHinduHeadlines = fetchTheHinduHeadlines;
+window.switchView  = switchView;
+window.escapeHTML  = escapeHTML;
 window.formatDate  = formatDate;
 window.uid         = uid;
+window.checkPiHealth = checkPiHealth;

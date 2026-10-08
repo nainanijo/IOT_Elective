@@ -1,0 +1,273 @@
+{
+  "communities": {
+    "0": [
+      "public_js_app",
+      "public_js_app_app",
+      "public_js_app_fetchthehinduheadlines",
+      "public_js_app_formatdate",
+      "public_js_app_isnoticeexpired",
+      "public_js_app_loadcollegelogo",
+      "public_js_app_loaddata",
+      "public_js_app_renderflashnewsticker",
+      "public_js_app_savedata",
+      "public_js_app_schedulenewsrefresh",
+      "public_js_app_the_hindu_default_headlines",
+      "public_js_app_togglefullscreen",
+      "public_js_app_uid",
+      "public_js_app_updatecollegelogodisplay",
+      "public_js_app_updateurgentbanner",
+      "public_js_app_weather_icons"
+    ],
+    "1": [
+      "public_js_admin",
+      "public_js_admin_break_presets",
+      "public_js_admin_canceleditnotice",
+      "public_js_admin_closeadmin",
+      "public_js_admin_deletenotice",
+      "public_js_admin_editnotice",
+      "public_js_admin_exportdata",
+      "public_js_admin_fillbreakpreset",
+      "public_js_admin_handleimport",
+      "public_js_admin_importdata",
+      "public_js_admin_renderadminnotices",
+      "public_js_admin_savenotice",
+      "public_js_admin_savesettings"
+    ],
+    "2": [
+      "public_js_admin_addttperiod",
+      "public_js_admin_autorenumberperiods",
+      "public_js_admin_canceleditttperiod",
+      "public_js_admin_deletettperiod",
+      "public_js_admin_handledragend",
+      "public_js_admin_handledragleave",
+      "public_js_admin_handledragover",
+      "public_js_admin_handledragstart",
+      "public_js_admin_handledrop",
+      "public_js_admin_movettperiod",
+      "public_js_admin_renderadmintimetableday",
+      "public_js_admin_savesubjecttocatalog"
+    ],
+    "3": [
+      "package",
+      "package_author",
+      "package_description",
+      "package_keywords",
+      "package_license",
+      "package_main",
+      "package_name",
+      "package_scripts",
+      "package_scripts_dev",
+      "package_scripts_start",
+      "package_version"
+    ],
+    "4": [
+      "public_js_admin_canceleditach",
+      "public_js_admin_deleteachievement",
+      "public_js_admin_editachievement",
+      "public_js_admin_handleimagefile",
+      "public_js_admin_renderadminachievements",
+      "public_js_admin_saveachievement",
+      "public_js_admin_updateachpreview"
+    ],
+    "5": [
+      "public_js_admin_dologin",
+      "public_js_admin_loadsettings",
+      "public_js_admin_openadmindashboard",
+      "public_js_admin_renderadmintimetable",
+      "public_js_admin_resettodefaults",
+      "public_js_admin_showerror",
+      "public_js_admin_switchadmintab"
+    ],
+    "6": [
+      "public_js_app_applytheme",
+      "public_js_app_checksunsettheme",
+      "public_js_app_getcampussuntimes",
+      "public_js_app_showtoast",
+      "public_js_app_togglethemepreview",
+      "public_js_app_updateclock"
+    ],
+    "7": [
+      "public_js_app_fetchachievementsfrombackend",
+      "public_js_app_fetchnoticesfrombackend",
+      "public_js_app_renderachievements",
+      "public_js_app_rendernotices",
+      "public_js_app_resetkioskprogress",
+      "public_js_app_switchview"
+    ],
+    "8": [
+      "public_js_app_fetchweather",
+      "public_js_app_getweathericon",
+      "public_js_app_parseopenmeteo",
+      "public_js_app_renderweather",
+      "public_js_app_scheduleweatherrefresh",
+      "public_js_app_updateheaderweather"
+    ],
+    "9": [
+      "public_js_admin_editttperiod",
+      "public_js_admin_getsubjectsforclass",
+      "public_js_admin_onsubjectselectchange",
+      "public_js_admin_populatesubjectdropdown",
+      "public_js_admin_syncsubjectdropdownwithform"
+    ],
+    "10": [
+      "public_js_app_iscurrentperiod",
+      "public_js_app_rendertimetable",
+      "public_js_app_rendertimetablecards"
+    ],
+    "11": [
+      "public_js_app_nextview",
+      "public_js_app_startkiosk",
+      "public_js_app_stopkiosk"
+    ],
+    "12": [
+      "public_js_mock_data",
+      "public_js_mock_data_default_data"
+    ]
+  },
+  "cohesion": {
+    "0": 0.15,
+    "1": 0.19230769230769232,
+    "2": 0.19696969696969696,
+    "3": 0.18181818181818182,
+    "4": 0.2857142857142857,
+    "5": 0.2857142857142857,
+    "6": 0.4,
+    "7": 0.3333333333333333,
+    "8": 0.4,
+    "9": 0.6,
+    "10": 0.6666666666666666,
+    "11": 0.6666666666666666,
+    "12": 1.0
+  },
+  "gods": [
+    {
+      "id": "public_js_admin_renderadmintimetableday",
+      "label": "renderAdminTimetableDay()",
+      "degree": 13
+    },
+    {
+      "id": "public_js_app_checksunsettheme",
+      "label": "checkSunsetTheme()",
+      "degree": 7
+    },
+    {
+      "id": "public_js_app_switchview",
+      "label": "switchView()",
+      "degree": 7
+    },
+    {
+      "id": "public_js_admin_populatesubjectdropdown",
+      "label": "populateSubjectDropdown()",
+      "degree": 7
+    },
+    {
+      "id": "public_js_admin_switchadmintab",
+      "label": "switchAdminTab()",
+      "degree": 6
+    },
+    {
+      "id": "public_js_app_fetchweather",
+      "label": "fetchWeather()",
+      "degree": 6
+    },
+    {
+      "id": "public_js_app_rendertimetable",
+      "label": "renderTimetable()",
+      "degree": 5
+    },
+    {
+      "id": "public_js_admin_addttperiod",
+      "label": "addTTPeriod()",
+      "degree": 5
+    },
+    {
+      "id": "public_js_admin_renderadminnotices",
+      "label": "renderAdminNotices()",
+      "degree": 4
+    },
+    {
+      "id": "public_js_admin_canceleditttperiod",
+      "label": "cancelEditTTPeriod()",
+      "degree": 4
+    }
+  ],
+  "surprises": [
+    {
+      "source": "switchAdminTab()",
+      "target": "renderAdminNotices()",
+      "source_files": [
+        "public/js/admin.js",
+        "public/js/admin.js"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "note": "Bridges community 1 → community 5"
+    },
+    {
+      "source": "switchView()",
+      "target": "renderTimetable()",
+      "source_files": [
+        "public/js/app.js",
+        "public/js/app.js"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "note": "Bridges community 10 → community 7"
+    },
+    {
+      "source": "nextView()",
+      "target": "switchView()",
+      "source_files": [
+        "public/js/app.js",
+        "public/js/app.js"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "note": "Bridges community 11 → community 7"
+    },
+    {
+      "source": "addTTPeriod()",
+      "target": "populateSubjectDropdown()",
+      "source_files": [
+        "public/js/admin.js",
+        "public/js/admin.js"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "note": "Bridges community 2 → community 9"
+    },
+    {
+      "source": "renderAdminTimetable()",
+      "target": "renderAdminTimetableDay()",
+      "source_files": [
+        "public/js/admin.js",
+        "public/js/admin.js"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "note": "Bridges community 2 → community 5"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `renderAdminTimetableDay()` connect `renderAdminTimetableDay` to `admin.js`, `switchAdminTab`, `populateSubjectDropdown`?",
+      "why": "High betweenness centrality (0.007) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `switchView()` connect `switchView` to `app.js`, `fetchWeather`, `renderTimetable`, `nextView`?",
+      "why": "High betweenness centrality (0.002) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 2 inferred relationships involving `renderAdminTimetableDay()` (e.g. with `handleDragEnd()` and `handleDragLeave()`) actually correct?",
+      "why": "`renderAdminTimetableDay()` has 2 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `App`, `THE_HINDU_DEFAULT_HEADLINES`, `WEATHER_ICONS` to the rest of the system?",
+      "why": "14 weakly-connected nodes found - possible documentation gaps or missing edges."
+    }
+  ]
+}

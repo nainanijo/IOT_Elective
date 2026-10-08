@@ -2,10 +2,14 @@
   "name": "smart-digital-notice-board",
   "version": "1.0.0",
   "description": "Smart Digital Notice Board - Department of Mechatronics Engineering",
-  "main": "index.html",
+  "main": "public/index.html",
   "scripts": {
-    "dev": "npx -y serve . -l 5173",
-    "start": "npx -y serve . -l 5173"
+    "dev": "npx -y serve public -l 5173",
+    "start": "npx -y serve public -l 5173",
+    "build": "node -e \"const fs = require('fs'); if (!fs.existsSync('public/index.html')) throw new Error('Missing public/index.html'); console.log('Static distribution verified: public/ ready for Firebase Hosting.');\"",
+    "test": "node tests/test_frontend_dom.js && python -m pytest tests/test_api.py",
+    "test:frontend": "node tests/test_frontend_dom.js",
+    "test:backend": "python -m pytest tests/test_api.py"
   },
   "keywords": [
     "iot",
@@ -13,5 +17,8 @@
     "mechatronics"
   ],
   "author": "Naina, Jobis, Evan, Indrajith",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
 }

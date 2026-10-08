@@ -8,6 +8,69 @@
 // js/admin.js
 
 let isLoggedIn = false;
+let authToken = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('iot_admin_token') : null) || null;
+
+function getApiBaseUrl() {
+  if (typeof window !== 'undefined' && window.getApiBase) {
+    return window.getApiBase().replace(/\/+$/, '');
+  }
+  if (typeof window !== 'undefined' && window.APP_CONFIG && window.APP_CONFIG.apiBase) {
+    return window.APP_CONFIG.apiBase.replace(/\/+$/, '');
+  }
+  const ip = typeof PI_IP !== 'undefined' ? PI_IP : 'localhost';
+  return `http://${ip}:5000`;
+}
+
+function getAuthToken() {
+  if (authToken) return authToken;
+  if (typeof sessionStorage !== 'undefined') {
+    authToken = sessionStorage.getItem('iot_admin_token');
+  }
+  return authToken;
+}
+
+function setAuthToken(token) {
+  authToken = token;
+  if (typeof sessionStorage !== 'undefined') {
+    if (token) {
+      sessionStorage.setItem('iot_admin_token', token);
+    } else {
+      sessionStorage.removeItem('iot_admin_token');
+    }
+  }
+}
+
+async function syncToBackend(endpoint, payload) {
+  const token = getAuthToken();
+  if (!token) {
+    return { ok: false, status: 401, error: 'Not authenticated with backend (saved in local cache only).' };
+  }
+  const apiBase = getApiBaseUrl();
+  try {
+    const response = await fetch(`${apiBase}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      setAuthToken(null);
+      isLoggedIn = false;
+      return { ok: false, status: response.status, error: 'Backend session expired — please log in again.' };
+    }
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { ok: false, status: response.status, error: data.error || `Server returned HTTP ${response.status}` };
+    }
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, status: 0, error: 'Backend offline/unreachable' };
+  }
+}
 
 async function doLogin() {
   const user = document.getElementById('login-username').value.trim();
@@ -15,25 +78,28 @@ async function doLogin() {
   const err = document.getElementById('login-error');
 
   try {
-    const response = await fetch(`http://${PI_IP}:5000/api/login`, {
+    const apiBase = getApiBaseUrl();
+    const response = await fetch(`${apiBase}/api/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: user, password: pass })
     });
 
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
 
-    if (response.ok && data.success) {
+    if (response.ok && data.success && data.token) {
+      setAuthToken(data.token);
       isLoggedIn = true;
       document.getElementById('admin-login-screen').classList.remove('open');
       openAdminDashboard();
       if (err) err.classList.remove('visible');
+      window.showToast('Logged in successfully!', 'success');
     } else {
-      showError(err, 'X Invalid credentials. Please try again.');
+      showError(err, (data && data.error) ? data.error : 'Invalid credentials. Please try again.');
     }
   } catch (error) {
     console.error('Login error:', error);
-    showError(err, 'X Server connection failed.');
+    showError(err, 'Server connection failed.');
   }
 }
 
@@ -48,6 +114,7 @@ function showError(errElement, message) {
     passInput.focus();
   }
 }
+
 function openAdminDashboard() {
   const dash = document.getElementById('admin-dashboard');
   dash.classList.add('open');
@@ -56,8 +123,9 @@ function openAdminDashboard() {
 
 function closeAdmin() {
   isLoggedIn = false;
+  setAuthToken(null);
   document.getElementById('admin-dashboard').classList.remove('open');
-  window.showToast('Logged out successfully.', 'success');
+  window.showToast('Logged out successfully.', 'info');
 }
 
 function switchAdminTab(tab) {
@@ -138,7 +206,7 @@ function cancelEditNotice() {
   document.getElementById('notice-form-cancel').style.display = 'none';
 }
 
-function saveNotice() {
+async function saveNotice() {
   const title = document.getElementById('notice-form-title').value.trim();
   const category = document.getElementById('notice-form-category').value;
   const priority = document.getElementById('notice-form-priority').value;
@@ -146,7 +214,8 @@ function saveNotice() {
   const deadline = document.getElementById('notice-form-deadline')?.value || date;
   const author = document.getElementById('notice-form-author').value.trim();
   const content = document.getElementById('notice-form-content').value.trim();
-  const active = document.getElementById('notice-form-active').checked;
+  const activeCheckbox = document.getElementById('notice-form-active');
+  const active = activeCheckbox ? activeCheckbox.checked : true;
 
   if (!title || !content) { window.showToast('Title and content are required.', 'error'); return; }
 
@@ -161,7 +230,7 @@ function saveNotice() {
       id: window.uid(), title, category, priority,
       date: date || new Date().toISOString().split('T')[0],
       deadline: deadline || date || new Date().toISOString().split('T')[0],
-      author: author || 'Admin', content, active: true
+      author: author || 'Admin', content, active
     });
   }
 
@@ -170,17 +239,29 @@ function saveNotice() {
   window.updateUrgentBanner();
   renderAdminNotices();
   cancelEditNotice();
-  window.showToast('Notice saved successfully!', 'success');
+
+  const sync = await syncToBackend('/api/notices', { notices: window.App.data.notices });
+  if (sync.ok) {
+    window.showToast('Notice saved & synced to backend!', 'success');
+  } else {
+    window.showToast(`Saved locally (${sync.error})`, 'warning');
+  }
 }
 
-function deleteNotice(id) {
+async function deleteNotice(id) {
   if (!confirm('Delete this notice?')) return;
   window.App.data.notices = (window.App.data.notices || []).filter(x => x.id !== id);
   window.saveData();
   window.renderNotices();
   window.updateUrgentBanner();
   renderAdminNotices();
-  window.showToast('Notice deleted.', 'success');
+
+  const sync = await syncToBackend('/api/notices', { notices: window.App.data.notices });
+  if (sync.ok) {
+    window.showToast('Notice deleted & synced to backend.', 'success');
+  } else {
+    window.showToast(`Deleted locally (${sync.error})`, 'warning');
+  }
 }
 
 /* ── ADMIN ACHIEVEMENTS ─────────────────────────────────────────────────────── */
@@ -246,7 +327,7 @@ function cancelEditAch() {
   updateAchPreview();
 }
 
-function saveAchievement() {
+async function saveAchievement() {
   const studentName = document.getElementById('ach-form-name').value.trim();
   const rollNo = document.getElementById('ach-form-rollno').value.trim();
   const title = document.getElementById('ach-form-title').value.trim();
@@ -286,16 +367,28 @@ function saveAchievement() {
   window.renderAchievements();
   renderAdminAchievements();
   cancelEditAch();
-  window.showToast('Achievement saved!', 'success');
+
+  const sync = await syncToBackend('/api/achievements', { achievements: window.App.data.achievements });
+  if (sync.ok) {
+    window.showToast('Achievement saved & synced to backend!', 'success');
+  } else {
+    window.showToast(`Saved locally (${sync.error})`, 'warning');
+  }
 }
 
-function deleteAchievement(id) {
+async function deleteAchievement(id) {
   if (!confirm('Delete this achievement?')) return;
   window.App.data.achievements = (window.App.data.achievements || []).filter(x => x.id !== id);
   window.saveData();
   window.renderAchievements();
   renderAdminAchievements();
-  window.showToast('Achievement deleted.', 'success');
+
+  const sync = await syncToBackend('/api/achievements', { achievements: window.App.data.achievements });
+  if (sync.ok) {
+    window.showToast('Achievement deleted & synced to backend.', 'success');
+  } else {
+    window.showToast(`Deleted locally (${sync.error})`, 'warning');
+  }
 }
 
 function updateAchPreview() {
@@ -641,10 +734,25 @@ function handleDrop(e, targetIdx, day, cls) {
   window.showToast('Period order updated!', 'success');
 }
 
-function moveTTPeriod(day, cls, idx, direction) {
+function ensurePeriodId(p) {
+  if (!p) return '';
+  if (!p.id) {
+    p.id = (window.uid ? window.uid() : ('p_' + Math.random().toString(36).substring(2, 9)));
+  }
+  return p.id;
+}
+
+async function moveTTPeriod(day, cls, periodIdOrIdx, direction) {
   const dayData = window.App.data.timetable.days[day];
   if (!dayData || !dayData[cls]) return;
   const periods = dayData[cls];
+  let idx = -1;
+  if (typeof periodIdOrIdx === 'number') {
+    idx = periodIdOrIdx;
+  } else {
+    idx = periods.findIndex(p => (p && p.id === periodIdOrIdx));
+  }
+  if (idx === -1) return;
   const targetIdx = idx + direction;
   if (targetIdx < 0 || targetIdx >= periods.length) return;
 
@@ -653,22 +761,19 @@ function moveTTPeriod(day, cls, idx, direction) {
   periods[idx] = periods[targetIdx];
   periods[targetIdx] = temp;
 
-  // Update editingTT index if active
-  if (editingTT && editingTT.day === day && editingTT.cls === cls) {
-    if (editingTT.idx === idx) {
-      editingTT.idx = targetIdx;
-    } else if (editingTT.idx === targetIdx) {
-      editingTT.idx = idx;
-    }
-  }
-
   window.saveData();
   if (window.renderTimetable) window.renderTimetable();
   renderAdminTimetableDay();
-  window.showToast('Period order updated!', 'success');
+
+  const sync = await syncToBackend('/api/timetable', window.App.data.timetable);
+  if (sync.ok) {
+    window.showToast('Period order updated & synced!', 'success');
+  } else {
+    window.showToast('Period order updated locally.', 'info');
+  }
 }
 
-function autoRenumberPeriods() {
+async function autoRenumberPeriods() {
   const day = document.getElementById('admin-tt-day-select')?.value || 'Monday';
   const cls = document.getElementById('admin-tt-class-select')?.value || 'S7 MRE';
   const dayData = window.App.data.timetable.days[day];
@@ -679,6 +784,7 @@ function autoRenumberPeriods() {
 
   let counter = 1;
   dayData[cls].forEach(p => {
+    ensurePeriodId(p);
     const sub = (p.subject || '').trim().toLowerCase();
     const per = (p.period || '').trim().toLowerCase();
     if (sub.includes('lunch') || per === 'lunch') {
@@ -694,6 +800,8 @@ function autoRenumberPeriods() {
   if (window.renderTimetable) window.renderTimetable();
   renderAdminTimetableDay();
   window.showToast('Periods renumbered sequentially!', 'success');
+
+  syncToBackend('/api/timetable', window.App.data.timetable);
 }
 
 function renderAdminTimetableDay() {
@@ -706,11 +814,13 @@ function renderAdminTimetableDay() {
   list.innerHTML = '';
 
   periods.forEach((p, idx) => {
-    const isEditing = editingTT && editingTT.day === day && editingTT.cls === cls && editingTT.idx === idx;
+    ensurePeriodId(p);
+    const isEditing = editingTT && editingTT.day === day && editingTT.cls === cls && editingTT.id === p.id;
     const item = document.createElement('div');
     item.className = 'admin-list-item draggable' + (isEditing ? ' active-editing' : '');
     item.draggable = true;
     item.dataset.index = idx;
+    item.dataset.id = p.id;
 
     // Drag-and-drop listeners
     item.addEventListener('dragstart', (e) => handleDragStart(e, idx));
@@ -733,10 +843,10 @@ function renderAdminTimetableDay() {
         </div>
       </div>
       <div class="ali-actions">
-        <button type="button" class="btn-sm btn-ghost" onclick="moveTTPeriod('${day}', '${cls}', ${idx}, -1)" ${idx === 0 ? 'disabled' : ''} title="Move Up">▲</button>
-        <button type="button" class="btn-sm btn-ghost" onclick="moveTTPeriod('${day}', '${cls}', ${idx}, 1)" ${idx === periods.length - 1 ? 'disabled' : ''} title="Move Down">▼</button>
-        <button type="button" class="btn-sm btn-secondary" onclick="editTTPeriod('${day}', '${cls}', ${idx})" title="Edit period"></button>
-        <button type="button" class="btn-sm btn-danger" onclick="deleteTTPeriod('${day}', '${cls}', ${idx})" title="Delete period"></button>
+        <button type="button" class="btn-sm btn-ghost" onclick="moveTTPeriod('${day}', '${cls}', '${p.id}', -1)" ${idx === 0 ? 'disabled' : ''} title="Move Up">▲</button>
+        <button type="button" class="btn-sm btn-ghost" onclick="moveTTPeriod('${day}', '${cls}', '${p.id}', 1)" ${idx === periods.length - 1 ? 'disabled' : ''} title="Move Down">▼</button>
+        <button type="button" class="btn-sm btn-secondary" onclick="editTTPeriod('${day}', '${cls}', '${p.id}')" title="Edit period"></button>
+        <button type="button" class="btn-sm btn-danger" onclick="deleteTTPeriod('${day}', '${cls}', '${p.id}')" title="Delete period"></button>
       </div>`;
     list.appendChild(item);
   });
@@ -745,11 +855,19 @@ function renderAdminTimetableDay() {
   }
 }
 
-function editTTPeriod(day, cls, idx) {
+function editTTPeriod(day, cls, periodIdOrIdx) {
   const dayData = window.App.data.timetable.days[day];
-  if (!dayData || !dayData[cls] || !dayData[cls][idx]) return;
-  const p = dayData[cls][idx];
-  editingTT = { day, cls, idx };
+  if (!dayData || !dayData[cls]) return;
+  const periods = dayData[cls];
+  let p = null;
+  if (typeof periodIdOrIdx === 'number') {
+    p = periods[periodIdOrIdx];
+  } else {
+    p = periods.find(x => x && x.id === periodIdOrIdx) || periods[periodIdOrIdx];
+  }
+  if (!p) return;
+  ensurePeriodId(p);
+  editingTT = { day, cls, id: p.id };
 
   // Set selectors
   const daySel = document.getElementById('admin-tt-day-select');
@@ -771,7 +889,7 @@ function editTTPeriod(day, cls, idx) {
 
   // Update UI heading and buttons
   const heading = document.getElementById('tt-form-heading');
-  if (heading) heading.textContent = ` Edit Period (P${p.period || idx + 1})`;
+  if (heading) heading.textContent = ` Edit Period (${p.period || p.subject})`;
   const submitBtn = document.getElementById('tt-form-submit');
   if (submitBtn) submitBtn.textContent = ' Update Period';
   const cancelBtn = document.getElementById('tt-form-cancel');
@@ -794,7 +912,7 @@ function cancelEditTTPeriod() {
   renderAdminTimetableDay();
 }
 
-function addTTPeriod() {
+async function addTTPeriod() {
   const day = document.getElementById('admin-tt-day-select').value;
   const cls = document.getElementById('admin-tt-class-select').value;
   const period = document.getElementById('tt-form-period').value.trim();
@@ -812,14 +930,20 @@ function addTTPeriod() {
   if (!window.App.data.timetable.days[day][cls]) window.App.data.timetable.days[day][cls] = [];
 
   if (editingTT) {
-    const { day: eDay, cls: eCls, idx: eIdx } = editingTT;
-    if (window.App.data.timetable.days[eDay] && window.App.data.timetable.days[eDay][eCls]) {
-      window.App.data.timetable.days[eDay][eCls][eIdx] = { period, time, subject, code, teacher };
+    const { day: eDay, cls: eCls, id: eId } = editingTT;
+    const periods = window.App.data.timetable.days[eDay]?.[eCls] || [];
+    const targetPeriod = periods.find(p => p && p.id === eId);
+    if (targetPeriod) {
+      Object.assign(targetPeriod, { period, time, subject, code, teacher });
     }
     cancelEditTTPeriod();
     window.showToast('Period updated successfully!', 'success');
   } else {
-    window.App.data.timetable.days[day][cls].push({ period, time, subject, code, teacher });
+    const newPeriod = {
+      id: window.uid ? window.uid() : ('p_' + Math.random().toString(36).substring(2, 9)),
+      period, time, subject, code, teacher
+    };
+    window.App.data.timetable.days[day][cls].push(newPeriod);
     document.getElementById('tt-form').reset();
     const subSel = document.getElementById('tt-subject-select');
     if (subSel) subSel.value = '';
@@ -830,123 +954,222 @@ function addTTPeriod() {
   if (window.renderTimetable) window.renderTimetable();
   renderAdminTimetableDay();
   populateSubjectDropdown();
+
+  const sync = await syncToBackend('/api/timetable', window.App.data.timetable);
+  if (sync.ok) {
+    window.showToast('Timetable synced to backend!', 'success');
+  } else {
+    window.showToast(`Saved locally (${sync.error})`, 'warning');
+  }
 }
 
-function deleteTTPeriod(day, cls, idx) {
+async function deleteTTPeriod(day, cls, periodIdOrIdx) {
   if (!confirm(`Delete this period from ${cls}?`)) return;
-  if (editingTT && editingTT.day === day && editingTT.cls === cls && editingTT.idx === idx) {
+  if (editingTT && editingTT.day === day && editingTT.cls === cls && (editingTT.id === periodIdOrIdx || editingTT.idx === periodIdOrIdx)) {
     cancelEditTTPeriod();
   }
-  if (window.App.data.timetable.days[day] && window.App.data.timetable.days[day][cls]) {
-    window.App.data.timetable.days[day][cls].splice(idx, 1);
+  const dayData = window.App.data.timetable.days[day];
+  if (dayData && dayData[cls]) {
+    if (typeof periodIdOrIdx === 'number') {
+      dayData[cls].splice(periodIdOrIdx, 1);
+    } else {
+      dayData[cls] = dayData[cls].filter(p => (p && p.id ? p.id !== periodIdOrIdx : p !== periodIdOrIdx));
+    }
   }
   window.saveData();
   if (window.renderTimetable) window.renderTimetable();
   renderAdminTimetableDay();
   populateSubjectDropdown();
-  window.showToast('Period deleted.', 'success');
+
+  const sync = await syncToBackend('/api/timetable', window.App.data.timetable);
+  if (sync.ok) {
+    window.showToast('Period deleted & synced to backend.', 'success');
+  } else {
+    window.showToast(`Deleted locally (${sync.error})`, 'warning');
+  }
 }
 
 /* ── SETTINGS ─────────────────────────────────────────────────────────────── */
 function loadSettings() {
-  const cfg = window.App.data.config;
+  const cfg = (window.App.data && window.App.data.config) || {};
   const sbt = document.getElementById('set-board-title');
   if (sbt) sbt.value = cfg.boardTitle || '';
   const sin = document.getElementById('set-institution');
   if (sin) sin.value = cfg.institution || '';
-  document.getElementById('set-weather-endpoint').value = cfg.weatherEndpoint || '';
-  document.getElementById('set-weather-city').value = cfg.weatherCity || '';
-  document.getElementById('set-rotate-interval').value = cfg.rotateInterval || 12;
-  document.getElementById('set-auto-rotate').checked = cfg.autoRotate;
+  const swe = document.getElementById('set-weather-endpoint');
+  if (swe) swe.value = cfg.weatherEndpoint || '';
+  const swc = document.getElementById('set-weather-city');
+  if (swc) swc.value = cfg.weatherCity || '';
+  const sri = document.getElementById('set-rotate-interval');
+  if (sri) sri.value = cfg.rotateInterval || 12;
+  const sar = document.getElementById('set-auto-rotate');
+  if (sar) sar.checked = !!cfg.autoRotate;
 
   const themeModeEl = document.getElementById('set-theme-mode');
   if (themeModeEl) themeModeEl.value = cfg.theme || 'auto';
 
-  const adm = window.App.data.admin;
-  document.getElementById('set-admin-user').value = adm.username;
+  const adm = (window.App.data && window.App.data.admin) || {};
+  const admUserEl = document.getElementById('set-admin-user');
+  if (admUserEl) admUserEl.value = adm.username || 'admin';
 
   if (window.updateCollegeLogoDisplay) window.updateCollegeLogoDisplay();
 }
 
 async function saveSettings() {
+  if (!window.App.data) window.App.data = {};
+  if (!window.App.data.config) window.App.data.config = {};
   const cfg = window.App.data.config;
+
   const sbt = document.getElementById('set-board-title');
   if (sbt) cfg.boardTitle = sbt.value.trim() || cfg.boardTitle;
   const sin = document.getElementById('set-institution');
   if (sin) cfg.institution = sin.value.trim() || cfg.institution;
-  cfg.weatherEndpoint = document.getElementById('set-weather-endpoint').value.trim();
-  cfg.weatherCity = document.getElementById('set-weather-city').value.trim() || cfg.weatherCity;
-  cfg.rotateInterval = parseInt(document.getElementById('set-rotate-interval').value) || 12;
-  cfg.autoRotate = document.getElementById('set-auto-rotate').checked;
+  const swe = document.getElementById('set-weather-endpoint');
+  if (swe) cfg.weatherEndpoint = swe.value.trim();
+  const swc = document.getElementById('set-weather-city');
+  if (swc) cfg.weatherCity = swc.value.trim() || cfg.weatherCity;
+  const sri = document.getElementById('set-rotate-interval');
+  if (sri) cfg.rotateInterval = parseInt(sri.value) || 12;
+  const sar = document.getElementById('set-auto-rotate');
+  if (sar) sar.checked = !!sar.checked;
 
   const themeModeEl = document.getElementById('set-theme-mode');
   if (themeModeEl) cfg.theme = themeModeEl.value;
 
-  const newUser = document.getElementById('set-admin-user').value.trim();
-  const newPass = document.getElementById('set-admin-pass').value.trim();
+  const newUser = document.getElementById('set-admin-user')?.value.trim();
+  const newPass = document.getElementById('set-admin-pass')?.value.trim();
+  if (!window.App.data.admin) {
+    window.App.data.admin = { username: 'admin' };
+  }
   if (newUser) window.App.data.admin.username = newUser;
-  if (newPass) window.App.data.admin.password = newPass;
+  if (newPass) {
+    window.showToast('Note: Backend credentials must be configured on the server via .env (ADMIN_PASSWORD).', 'info');
+  }
+  delete window.App.data.admin.password;
 
   window.saveData();
-// Apply changes live on the page
+
+  // Apply changes live on the page
   const bt = document.getElementById('board-title');
   if (bt) bt.textContent = cfg.boardTitle;
   const bi = document.getElementById('board-institution');
   if (bi) bi.textContent = cfg.institution;
 
-  // 1. Refresh logo from Pi backend instead of session storage
-  if (typeof loadCollegeLogo === 'function') {
-    loadCollegeLogo();
+  if (window.updateCollegeLogoDisplay) {
+    window.updateCollegeLogoDisplay();
   }
 
-  // 2. Persist settings to backend
-  try {
-    await fetch(`http://${PI_IP}:5000/api/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cfg)
-    });
-  } catch (err) {
-    console.error('Failed to persist settings to backend:', err);
+  const sync = await syncToBackend('/api/settings', cfg);
+  if (sync.ok) {
+    window.showToast('Settings saved & synced to backend!', 'success');
+  } else {
+    window.showToast(`Settings saved locally (${sync.error})`, 'warning');
   }
 
   if (window.checkSunsetTheme) window.checkSunsetTheme();
-
   if (cfg.autoRotate) { window.startKiosk(); } else { window.stopKiosk(); }
   if (window.fetchWeather) window.fetchWeather();
   if (window.scheduleWeatherRefresh) window.scheduleWeatherRefresh();
 
-  window.showToast('Settings saved!', 'success');
   const passInput = document.getElementById('set-admin-pass');
   if (passInput) passInput.value = '';
 }
 
 function exportData() {
-  const blob = new Blob([JSON.stringify(window.App.data, null, 2)], { type: 'application/json' });
+  const exportPayload = JSON.parse(JSON.stringify(window.App.data || {}));
+  if (exportPayload.admin) {
+    delete exportPayload.admin.password;
+  }
+  delete exportPayload.token;
+  delete exportPayload.sessionToken;
+
+  const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `noticeboard_backup_${new Date().toISOString().split('T')[0]}.json`;
   a.click();
-  window.showToast('Data exported!', 'success');
+  window.showToast('Data exported (credentials excluded)!', 'success');
 }
 
 function importData() { document.getElementById('import-file-input').click(); }
 
 function handleImport(e) {
-  const file = e.target.files[0];
+  const file = e.target.files && e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = evt => {
+  reader.onload = async evt => {
     try {
       const parsed = JSON.parse(evt.target.result);
-      window.App.data = parsed;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Root JSON must be an object');
+      }
+
+      const hasKnownKey = ('notices' in parsed) || ('achievements' in parsed) || ('timetable' in parsed) || ('config' in parsed);
+      if (!hasKnownKey) {
+        throw new Error('Unrecognized backup format: missing notices, achievements, timetable, or config');
+      }
+
+      if ('notices' in parsed && !Array.isArray(parsed.notices)) {
+        throw new Error('Invalid format: notices must be a list');
+      }
+      if ('achievements' in parsed && !Array.isArray(parsed.achievements)) {
+        throw new Error('Invalid format: achievements must be a list');
+      }
+      if ('timetable' in parsed && (typeof parsed.timetable !== 'object' || parsed.timetable === null || Array.isArray(parsed.timetable))) {
+        throw new Error('Invalid format: timetable must be an object');
+      }
+      if ('config' in parsed && (typeof parsed.config !== 'object' || parsed.config === null || Array.isArray(parsed.config))) {
+        throw new Error('Invalid format: config must be an object');
+      }
+
+      // Create pre-import recoverable backup
+      try {
+        const preImport = JSON.parse(JSON.stringify(window.App.data || {}));
+        if (preImport.admin) delete preImport.admin.password;
+        localStorage.setItem('noticeboard_pre_import_backup', JSON.stringify(preImport));
+      } catch (backupErr) {
+        console.warn('Could not create pre-import backup:', backupErr);
+      }
+
+      // Sanitize imported data to exclude any credentials/secrets
+      if (parsed.admin) {
+        delete parsed.admin.password;
+      }
+      delete parsed.token;
+      delete parsed.sessionToken;
+
+      // Merge safely into window.App.data
+      if (Array.isArray(parsed.notices)) window.App.data.notices = parsed.notices;
+      if (Array.isArray(parsed.achievements)) window.App.data.achievements = parsed.achievements;
+      if (parsed.timetable && typeof parsed.timetable === 'object') window.App.data.timetable = parsed.timetable;
+      if (parsed.config && typeof parsed.config === 'object') window.App.data.config = Object.assign({}, window.App.data.config, parsed.config);
+
       window.saveData();
-      window.renderNotices();
-      window.renderAchievements();
-      window.updateUrgentBanner();
-      window.showToast('Data imported successfully!', 'success');
+      if (window.renderNotices) window.renderNotices();
+      if (window.renderAchievements) window.renderAchievements();
+      if (window.renderTimetable) window.renderTimetable();
+      if (window.updateUrgentBanner) window.updateUrgentBanner();
+      loadSettings();
+
+      if (isLoggedIn && getAuthToken()) {
+        const promises = [];
+        if (parsed.notices) promises.push(syncToBackend('/api/notices', { notices: window.App.data.notices }));
+        if (parsed.achievements) promises.push(syncToBackend('/api/achievements', { achievements: window.App.data.achievements }));
+        if (parsed.timetable) promises.push(syncToBackend('/api/timetable', window.App.data.timetable));
+        if (parsed.config) promises.push(syncToBackend('/api/settings', window.App.data.config));
+
+        const res = await Promise.all(promises);
+        if (res.every(r => r.ok)) {
+          window.showToast('Data imported and synced to backend!', 'success');
+        } else {
+          window.showToast('Data imported locally (Backend sync had warnings).', 'warning');
+        }
+      } else {
+        window.showToast('Data imported locally successfully!', 'success');
+      }
     } catch (err) {
-      window.showToast('Invalid JSON file.', 'error');
+      console.error('Import error:', err);
+      window.showToast(`Import failed: ${err.message}`, 'error');
     }
   };
   reader.readAsText(file);
@@ -1054,31 +1277,104 @@ document.addEventListener('DOMContentLoaded', () => {
   // Settings Logo upload / remove
   const setLogoFile = document.getElementById('set-logo-file');
   if (setLogoFile) {
-    setLogoFile.addEventListener('change', (e) => {
+    setLogoFile.addEventListener('change', async (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
       if (!file.type.startsWith('image/')) {
         window.showToast('Please select a valid image file', 'error');
         return;
       }
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        window.App.data.config.collegeLogo = ev.target.result;
+      if (file.size > 2 * 1024 * 1024) {
+        window.showToast('Logo file size exceeds 2MB limit', 'error');
+        return;
+      }
+
+      const token = getAuthToken();
+      const apiBase = getApiBaseUrl();
+
+      let uploadedUrl = null;
+      if (token) {
+        try {
+          const formData = new FormData();
+          formData.append('file', file);
+          const res = await fetch(`${apiBase}/api/upload-logo`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`
+            },
+            body: formData
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.success) {
+            uploadedUrl = data.url;
+          } else {
+            console.warn('Backend logo upload returned error:', data.error);
+          }
+        } catch (uploadErr) {
+          console.warn('Backend logo upload failed:', uploadErr);
+        }
+      }
+
+      if (uploadedUrl) {
+        window.App.data.config.collegeLogo = uploadedUrl;
         window.saveData();
+        await syncToBackend('/api/settings', window.App.data.config);
         if (window.updateCollegeLogoDisplay) window.updateCollegeLogoDisplay();
-        window.showToast('College logo uploaded!', 'success');
-      };
-      reader.readAsDataURL(file);
+        window.showToast('College logo uploaded & synced to backend!', 'success');
+      } else {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          window.App.data.config.collegeLogo = ev.target.result;
+          window.saveData();
+          if (window.updateCollegeLogoDisplay) window.updateCollegeLogoDisplay();
+          window.showToast('College logo saved locally (Backend offline or not synced).', 'warning');
+        };
+        reader.readAsDataURL(file);
+      }
     });
   }
 
   const setLogoRemoveBtn = document.getElementById('set-logo-remove-btn');
   if (setLogoRemoveBtn) {
-    setLogoRemoveBtn.addEventListener('click', () => {
+    setLogoRemoveBtn.addEventListener('click', async () => {
       window.App.data.config.collegeLogo = '';
       window.saveData();
+      await syncToBackend('/api/settings', window.App.data.config);
       if (window.updateCollegeLogoDisplay) window.updateCollegeLogoDisplay();
       window.showToast('College logo removed', 'info');
     });
   }
 });
+
+// Expose functions globally on window
+if (typeof window !== 'undefined') {
+  window.doLogin = doLogin;
+  window.closeAdmin = closeAdmin;
+  window.switchAdminTab = switchAdminTab;
+  window.saveNotice = saveNotice;
+  window.deleteNotice = deleteNotice;
+  window.editNotice = editNotice;
+  window.cancelEditNotice = cancelEditNotice;
+  window.renderAdminNotices = renderAdminNotices;
+  window.saveAchievement = saveAchievement;
+  window.deleteAchievement = deleteAchievement;
+  window.editAchievement = editAchievement;
+  window.cancelEditAch = cancelEditAch;
+  window.renderAdminAchievements = renderAdminAchievements;
+  window.loadSettings = loadSettings;
+  window.saveSettings = saveSettings;
+  window.exportData = exportData;
+  window.importData = importData;
+  window.handleImport = handleImport;
+  window.resetToDefaults = resetToDefaults;
+  window.addTTPeriod = addTTPeriod;
+  window.deleteTTPeriod = deleteTTPeriod;
+  window.editTTPeriod = editTTPeriod;
+  window.cancelEditTTPeriod = cancelEditTTPeriod;
+  window.moveTTPeriod = moveTTPeriod;
+  window.autoRenumberPeriods = autoRenumberPeriods;
+  window.renderAdminTimetableDay = renderAdminTimetableDay;
+  window.getAuthToken = getAuthToken;
+  window.setAuthToken = setAuthToken;
+  window.syncToBackend = syncToBackend;
+}
